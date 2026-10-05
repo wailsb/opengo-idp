@@ -4,31 +4,52 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/wailsb/opengo-idp/internal/domain/session"
 	"github.com/wailsb/opengo-idp/internal/domain/user"
 )
 
 type LoginInput struct {
-	Email     string
-	Password  string
-	IPAddress string
-	UserAgent string
-	ClientID  string
+	// Identifier is the user's email or username.
+	Identifier string
+	Password   string
+	IPAddress  string
+	UserAgent  string
+	// ClientID is optional; when set the client must exist and an ID token is issued.
+	ClientID string
+	Nonce    string
 }
 
 type LoginOutput struct {
 	Session *session.Session
+	Tokens  *TokenPair
+}
+
+// NormalizeIdentifier lowercases emails (stored lowercased at registration) and
+// leaves usernames untouched.
+func NormalizeIdentifier(identifier string) string {
+	identifier = strings.TrimSpace(identifier)
+	if strings.Contains(identifier, "@") {
+		return strings.ToLower(identifier)
+	}
+	return identifier
 }
 
 func (s *Service) Login(ctx context.Context, input LoginInput) (*LoginOutput, error) {
+	c, err := s.lookupClient(ctx, input.ClientID)
+	if err != nil {
+		return nil, err
+	}
+
 	// 1. Retrieve user from PostgreSQL
-	u, err := s.userRepo.GetByEmail(ctx, input.Email)
+	u, err := s.userRepo.GetByEmailOrUsername(ctx, NormalizeIdentifier(input.Identifier))
 	if errors.Is(err, user.ErrUserNotFound) {
+		_ = s.hasher.Compare(s.dummyHash, input.Password)
 		return nil, ErrInvalidCredentials
 	}
 	if err != nil {
-		return nil, fmt.Errorf("get user by email: %w", err)
+		return nil, fmt.Errorf("get user: %w", err)
 	}
 
 	// 2. Verify password hash
@@ -53,5 +74,13 @@ func (s *Service) Login(ctx context.Context, input LoginInput) (*LoginOutput, er
 		return nil, fmt.Errorf("create session: %w", err)
 	}
 
-	return &LoginOutput{Session: sess}, nil
+	// 5. Issue tokens bound to the session; drop the session if that fails so no
+	// orphan session is left behind.
+	tokens, err := s.issueTokens(ctx, u, sess.ID, c, input.Nonce)
+	if err != nil {
+		_ = s.sessionRepo.Delete(ctx, sess.ID)
+		return nil, err
+	}
+
+	return &LoginOutput{Session: sess, Tokens: tokens}, nil
 }

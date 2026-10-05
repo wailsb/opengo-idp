@@ -1,0 +1,5 @@
+/idp
+/bin/
+*.pem
+.env
+coverage.out

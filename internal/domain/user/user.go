@@ -53,6 +53,22 @@ func NewUser(email, plainPassword, username string) (*User, error) {
 	}, nil
 }
 
+// NewUserFromHash builds a user from an already hashed password, for callers that own
+// the hashing policy (e.g. a configured bcrypt cost).
+func NewUserFromHash(email, passwordHash, username string) *User {
+	now := time.Now().UTC()
+	return &User{
+		ID:           uuid.New(),
+		Email:        email,
+		PasswordHash: passwordHash,
+		Username:     username,
+		IsActive:     true,
+		IsDeleted:    false,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+}
+
 func (u *User) CheckPassword(password string) bool {
 	err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(password))
 	return err == nil
