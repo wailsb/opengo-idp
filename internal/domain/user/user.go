@@ -11,13 +11,14 @@ import (
 var (
 	ErrUserNotFound       = errors.New("user not found")
 	ErrUserAlreadyExists  = errors.New("user already exists")
-	ErrUnActiveUser       = errors.New("user is not active")
-	ErrDeletedUser        = errors.New("user is deleted")
+	ErrUserInactive       = errors.New("user is not active")
+	ErrUserAlreadyActive  = errors.New("user is already active")
+	ErrUserDeleted        = errors.New("user is deleted")
 	ErrInvalidCredentials = errors.New("invalid credentials")
 )
 
 type User struct {
-	UUID         uuid.UUID
+	ID           uuid.UUID
 	Email        string
 	PasswordHash string
 	Username     string
@@ -26,69 +27,102 @@ type User struct {
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
 }
+type UpdateUserParams struct {
+	Email    *string
+	Username *string
+	IsActive *bool
+}
 
-func NewUser(email, passwordHash, username string) (*User, error) {
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(passwordHash), bcrypt.DefaultCost)
+// NewUser expects a plain text password and hashes it internally
+func NewUser(email, plainPassword, username string) (*User, error) {
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(plainPassword), bcrypt.DefaultCost)
 	if err != nil {
 		return nil, err
 	}
 
+	now := time.Now().UTC()
 	return &User{
-		UUID:         uuid.New(),
+		ID:           uuid.New(),
 		Email:        email,
 		PasswordHash: string(hashedPassword),
 		Username:     username,
 		IsActive:     true,
 		IsDeleted:    false,
-		CreatedAt:    time.Now(),
-		UpdatedAt:    time.Now(),
+		CreatedAt:    now,
+		UpdatedAt:    now,
 	}, nil
 }
+
 func (u *User) CheckPassword(password string) bool {
 	err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(password))
 	return err == nil
 }
-func (u *User) Disable() (bool, error) {
-	if !u.IsActive {
-		return false, ErrUnActiveUser
+
+func (u *User) Disable() error {
+	if u.IsDeleted {
+		return ErrUserDeleted
 	}
+	if !u.IsActive {
+		return ErrUserInactive
+	}
+
 	u.IsActive = false
-	u.UpdatedAt = time.Now()
-	return true, nil
+	u.UpdatedAt = time.Now().UTC()
+	return nil
 }
-func (u *User) Enable() (bool, error) {
+
+func (u *User) Enable() error {
+	if u.IsDeleted {
+		return ErrUserDeleted
+	}
 	if u.IsActive {
-		return false, ErrUnActiveUser
+		return ErrUserAlreadyActive
 	}
+
 	u.IsActive = true
-	u.UpdatedAt = time.Now()
-	return true, nil
+	u.UpdatedAt = time.Now().UTC()
+	return nil
 }
-func (u *User) Delete() (bool, error) {
+
+func (u *User) Delete() error {
 	if u.IsDeleted {
-		return false, ErrDeletedUser
+		return ErrUserDeleted
 	}
+
 	u.IsDeleted = true
-	u.UpdatedAt = time.Now()
-	return true, nil
+	u.IsActive = false
+	u.UpdatedAt = time.Now().UTC()
+	return nil
 }
-func (u *User) UpdateInfo(uUpdate *User) (bool, error) {
+
+func (u *User) UpdateInfo(params UpdateUserParams) error {
 	if u.IsDeleted {
-		return false, ErrDeletedUser
+		return ErrUserDeleted
 	}
 	if !u.IsActive {
-		return false, ErrUnActiveUser
+		return ErrUserInactive
 	}
-	UpdatedUser := &User{
-		UUID:         uUpdate.UUID==nil? u.UUID : uUpdate.UUID,
-		Email:        uUpdate.Email==nil? u.UUID : uUpdate.UUID,
-		PasswordHash: uUpdate.PasswordHash==nil? u.UUID : uUpdate.UUID,
-		Username:     uUpdate.Username==nil? u.UUID : uUpdate.UUID,
-		IsActive:     uUpdate.IsActive==nil? u.UUID : uUpdate.UUID,
-		IsDeleted:    uUpdate.IsDeleted==nil? u.UUID : uUpdate.UUID,
-		CreatedAt:    uUpdate.CreatedAt==nil? u.UUID : uUpdate.UUID,
-		UpdatedAt:    uUpdate.UpdatedAt==nil? time.Now() : uUpdate.UpdatedAt,
+
+	hasChanges := false
+
+	if params.Email != nil && *params.Email != u.Email {
+		u.Email = *params.Email
+		hasChanges = true
 	}
-	u = UpdatedUser
-	return true, nil
+
+	if params.Username != nil && *params.Username != u.Username {
+		u.Username = *params.Username
+		hasChanges = true
+	}
+
+	if params.IsActive != nil && *params.IsActive != u.IsActive {
+		u.IsActive = *params.IsActive
+		hasChanges = true
+	}
+
+	if hasChanges {
+		u.UpdatedAt = time.Now().UTC()
+	}
+
+	return nil
 }
