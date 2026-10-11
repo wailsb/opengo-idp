@@ -15,17 +15,31 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/wailsb/opengo-idp/internal/domain/authcode"
+	"github.com/wailsb/opengo-idp/internal/domain/client"
 	"github.com/wailsb/opengo-idp/internal/domain/session"
 	"github.com/wailsb/opengo-idp/internal/domain/token"
 	"github.com/wailsb/opengo-idp/internal/usecase/auth"
 )
 
 type fakeAuth struct {
-	loginErr   error
-	refreshErr error
-	logoutErr  error
-	lastLogin  auth.LoginInput
-	loggedOut  []string
+	loginErr        error
+	refreshErr      error
+	logoutErr       error
+	validateErr     error
+	issueCodeErr    error
+	codeGrantErr    error
+	ccGrantErr      error
+	clientAuthErr   error
+	lastLogin       auth.LoginInput
+	lastRefresh     auth.RefreshInput
+	lastCodeInput   auth.AuthCodeGrantInput
+	lastCCInput     auth.ClientCredentialsInput
+	lastClientAuth  auth.ClientAuthInput
+	authedClient    *client.Client
+	issuedCode      string
+	lastIssueCodeIn auth.IssueAuthCodeInput
+	loggedOut       []string
 }
 
 var testTokens = &auth.TokenPair{AccessToken: "at", RefreshToken: "rt", TokenType: "Bearer", ExpiresIn: 900}
@@ -42,6 +56,7 @@ func (f *fakeAuth) Login(_ context.Context, in auth.LoginInput) (*auth.LoginOutp
 }
 
 func (f *fakeAuth) Refresh(_ context.Context, in auth.RefreshInput) (*auth.TokenPair, error) {
+	f.lastRefresh = in
 	if f.refreshErr != nil {
 		return nil, f.refreshErr
 	}
@@ -51,6 +66,66 @@ func (f *fakeAuth) Refresh(_ context.Context, in auth.RefreshInput) (*auth.Token
 func (f *fakeAuth) Logout(_ context.Context, id string) error {
 	f.loggedOut = append(f.loggedOut, id)
 	return f.logoutErr
+}
+
+func (f *fakeAuth) ValidateSession(_ context.Context, id string) (*session.Session, error) {
+	if f.validateErr != nil {
+		return nil, f.validateErr
+	}
+	if id == "" {
+		return nil, session.ErrSessionNotFound
+	}
+	return &session.Session{ID: id, UserID: testSubject, ExpiresAt: time.Now().Add(time.Hour)}, nil
+}
+
+func (f *fakeAuth) IssueAuthCode(_ context.Context, in auth.IssueAuthCodeInput) (*authcode.AuthCode, error) {
+	f.lastIssueCodeIn = in
+	if f.issueCodeErr != nil {
+		return nil, f.issueCodeErr
+	}
+	if f.issuedCode == "" {
+		f.issuedCode = "test-code"
+	}
+	return &authcode.AuthCode{Code: f.issuedCode}, nil
+}
+
+func (f *fakeAuth) AuthorizationCode(_ context.Context, in auth.AuthCodeGrantInput) (*auth.TokenPair, error) {
+	f.lastCodeInput = in
+	if f.codeGrantErr != nil {
+		return nil, f.codeGrantErr
+	}
+	return testTokens, nil
+}
+
+func (f *fakeAuth) ClientCredentials(_ context.Context, in auth.ClientCredentialsInput) (*auth.TokenPair, error) {
+	f.lastCCInput = in
+	if f.ccGrantErr != nil {
+		return nil, f.ccGrantErr
+	}
+	return &auth.TokenPair{AccessToken: "cc", TokenType: "Bearer", ExpiresIn: 900}, nil
+}
+
+func (f *fakeAuth) AuthenticateClient(_ context.Context, in auth.ClientAuthInput) (*client.Client, error) {
+	f.lastClientAuth = in
+	if f.clientAuthErr != nil {
+		return nil, f.clientAuthErr
+	}
+	if f.authedClient != nil {
+		return f.authedClient, nil
+	}
+	return &client.Client{ClientID: in.ClientID, IsConfidential: in.ClientSecret != ""}, nil
+}
+
+type fakeClients struct {
+	byID map[string]*client.Client
+}
+
+func (f *fakeClients) GetByClientID(_ context.Context, id string) (*client.Client, error) {
+	c, ok := f.byID[id]
+	if !ok {
+		return nil, client.ErrClientNotFound
+	}
+	return c, nil
 }
 
 type fakeVerifier struct{ panicOnJWKS bool }
@@ -74,8 +149,16 @@ func (f *fakeVerifier) GetJWKS(context.Context) (map[string]interface{}, error) 
 }
 
 func newTestServer(a *fakeAuth, v *fakeVerifier) http.Handler {
+	return newTestServerWithClients(a, v, nil)
+}
+
+func newTestServerWithClients(a *fakeAuth, v *fakeVerifier, clients map[string]*client.Client) http.Handler {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return NewServer(a, v, Config{Issuer: "https://idp.test/", SecureCookies: true}, log).Handler()
+	cl := &fakeClients{byID: clients}
+	if cl.byID == nil {
+		cl.byID = map[string]*client.Client{}
+	}
+	return NewServer(a, v, cl, Config{Issuer: "https://idp.test/", SecureCookies: true}, log).Handler()
 }
 
 func do(t *testing.T, h http.Handler, req *http.Request) (*httptest.ResponseRecorder, map[string]any) {
@@ -127,7 +210,7 @@ func TestPanicRecovery(t *testing.T) {
 }
 
 func loginReq(body string) *http.Request {
-	r := httptest.NewRequest("POST", "/login", strings.NewReader(body))
+	r := httptest.NewRequest("POST", "/api/login", strings.NewReader(body))
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("User-Agent", "test-ua")
 	r.RemoteAddr = "203.0.113.7:5555"
@@ -290,8 +373,9 @@ func TestUserInfo(t *testing.T) {
 }
 
 func TestMethodNotAllowed(t *testing.T) {
+	// /api/login is JSON-only POST, so a GET must be rejected.
 	rec := httptest.NewRecorder()
-	newTestServer(&fakeAuth{}, &fakeVerifier{}).ServeHTTP(rec, httptest.NewRequest("GET", "/login", nil))
+	newTestServer(&fakeAuth{}, &fakeVerifier{}).ServeHTTP(rec, httptest.NewRequest("GET", "/api/login", nil))
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("got %d", rec.Code)
 	}

@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Sign in</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 24rem; margin: 4rem auto; padding: 0 1rem; }
+    label { display: block; margin-top: 1rem; font-weight: 600; }
+    input { width: 100%; box-sizing: border-box; padding: .5rem; font-size: 1rem; }
+    button { margin-top: 1.5rem; padding: .5rem 1rem; font-size: 1rem; cursor: pointer; }
+    .error { color: #b00020; margin-top: 1rem; }
+  </style>
+</head>
+<body>
+  <h1>Sign in</h1>
+  {{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+  <form method="POST" action="/login" autocomplete="on">
+    <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+    <input type="hidden" name="return_to" value="{{.ReturnTo}}">
+    <label for="identifier">Email or username</label>
+    <input id="identifier" name="identifier" type="text" required autofocus value="{{.Identifier}}">
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" required>
+    <button type="submit">Sign in</button>
+  </form>
+</body>
+</html>

@@ -9,6 +9,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wailsb/opengo-idp/internal/domain/authcode"
+	"github.com/wailsb/opengo-idp/internal/domain/client"
+	"github.com/wailsb/opengo-idp/internal/domain/session"
 	"github.com/wailsb/opengo-idp/internal/domain/token"
 	"github.com/wailsb/opengo-idp/internal/usecase/auth"
 )
@@ -23,6 +26,17 @@ type AuthService interface {
 	Login(ctx context.Context, in auth.LoginInput) (*auth.LoginOutput, error)
 	Refresh(ctx context.Context, in auth.RefreshInput) (*auth.TokenPair, error)
 	Logout(ctx context.Context, sessionID string) error
+	ValidateSession(ctx context.Context, sessionID string) (*session.Session, error)
+	IssueAuthCode(ctx context.Context, in auth.IssueAuthCodeInput) (*authcode.AuthCode, error)
+	AuthorizationCode(ctx context.Context, in auth.AuthCodeGrantInput) (*auth.TokenPair, error)
+	ClientCredentials(ctx context.Context, in auth.ClientCredentialsInput) (*auth.TokenPair, error)
+	AuthenticateClient(ctx context.Context, in auth.ClientAuthInput) (*client.Client, error)
+}
+
+// ClientLookup is the subset of client.Repository used by /authorize to resolve
+// the client before any auth happens.
+type ClientLookup interface {
+	GetByClientID(ctx context.Context, clientID string) (*client.Client, error)
 }
 
 // TokenVerifier is the subset of token.Service used by the handlers.
@@ -38,15 +52,16 @@ type Config struct {
 }
 
 type Server struct {
-	auth   AuthService
-	tokens TokenVerifier
-	cfg    Config
-	log    *slog.Logger
+	auth    AuthService
+	tokens  TokenVerifier
+	clients ClientLookup
+	cfg     Config
+	log     *slog.Logger
 }
 
-func NewServer(a AuthService, t TokenVerifier, cfg Config, log *slog.Logger) *Server {
+func NewServer(a AuthService, t TokenVerifier, c ClientLookup, cfg Config, log *slog.Logger) *Server {
 	cfg.Issuer = strings.TrimRight(cfg.Issuer, "/")
-	return &Server{auth: a, tokens: t, cfg: cfg, log: log}
+	return &Server{auth: a, tokens: t, clients: c, cfg: cfg, log: log}
 }
 
 // Handler returns the routed handler wrapped in recovery and access logging.
@@ -55,8 +70,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET /.well-known/openid-configuration", s.handleDiscovery)
 	mux.HandleFunc("GET /.well-known/jwks.json", s.handleJWKS)
-	mux.HandleFunc("POST /login", s.handleLogin)
+	// HTML login (browser flow). JSON clients: /api/login.
+	mux.HandleFunc("GET /login", s.handleLoginGET)
+	mux.HandleFunc("POST /login", s.handleLoginPOST)
+	mux.HandleFunc("POST /api/login", s.handleAPILogin)
 	mux.HandleFunc("POST /logout", s.handleLogout)
+	mux.HandleFunc("GET /authorize", s.handleAuthorize)
 	mux.HandleFunc("POST /token", s.handleToken)
 	mux.HandleFunc("GET /userinfo", s.handleUserInfo)
 	return s.recoverer(s.accessLog(mux))
@@ -71,13 +90,20 @@ func (s *Server) handleDiscovery(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"issuer":                                iss,
 		"jwks_uri":                              iss + "/.well-known/jwks.json",
+		"authorization_endpoint":                iss + "/authorize",
 		"token_endpoint":                        iss + "/token",
 		"userinfo_endpoint":                     iss + "/userinfo",
-		"grant_types_supported":                 []string{"refresh_token"},
+		"response_types_supported":              []string{"code"},
+		"grant_types_supported":                 []string{"authorization_code", "refresh_token", "client_credentials"},
+		"scopes_supported":                      token.SupportedScopes,
+		"code_challenge_methods_supported":      []string{authcode.ChallengeMethodS256},
 		"subject_types_supported":               []string{"public"},
 		"id_token_signing_alg_values_supported": []string{"RS256"},
-		"token_endpoint_auth_methods_supported": []string{"none"},
-		"claims_supported":                      []string{"sub", "iss", "aud", "exp", "iat", "email", "preferred_username", "nonce"},
+		"token_endpoint_auth_methods_supported": []string{"client_secret_basic", "client_secret_post", "none"},
+		"claims_supported": []string{
+			"sub", "iss", "aud", "exp", "iat", "azp", "at_hash",
+			"email", "preferred_username", "nonce", "scope",
+		},
 	})
 }
 
