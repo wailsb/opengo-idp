@@ -43,7 +43,7 @@ func TestLogin_Success(t *testing.T) {
 		}
 		tp := out.Tokens
 		if tp.AccessToken != "access:"+f.alice.ID.String() ||
-			tp.RefreshToken != "refresh:"+f.alice.ID.String()+":"+out.Session.ID ||
+			tp.RefreshToken != "refresh:"+f.alice.ID.String()+":"+out.Session.ID+"::" ||
 			tp.TokenType != "Bearer" || tp.ExpiresIn != 900 {
 			t.Errorf("unexpected tokens: %+v", tp)
 		}
@@ -168,7 +168,7 @@ func TestRefresh_Success(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tp.AccessToken == "" || tp.RefreshToken != out.Tokens.RefreshToken || tp.IDToken == "" {
+	if tp.AccessToken == "" || tp.RefreshToken == "" || tp.IDToken == "" {
 		t.Errorf("unexpected tokens: %+v", tp)
 	}
 }

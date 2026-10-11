@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/wailsb/opengo-idp/internal/domain/access"
+	"github.com/wailsb/opengo-idp/internal/domain/authcode"
 	"github.com/wailsb/opengo-idp/internal/domain/client"
 	"github.com/wailsb/opengo-idp/internal/domain/session"
 	"github.com/wailsb/opengo-idp/internal/domain/token"
@@ -19,6 +20,9 @@ var (
 	// ErrInvalidGrant covers every refresh failure (bad token, dead session, disabled
 	// user) so callers can map it to the OAuth2 "invalid_grant" error.
 	ErrInvalidGrant = errors.New("invalid or expired grant")
+	// ErrUnauthorizedClient means the client exists but is not allowed to use the
+	// requested grant type.
+	ErrUnauthorizedClient = errors.New("client not authorized for this grant")
 )
 
 type PasswordHasher interface {
@@ -28,17 +32,20 @@ type PasswordHasher interface {
 
 // Deps are the collaborators of the auth Service.
 type Deps struct {
-	Users    user.Repository
-	Sessions session.Repository
-	Clients  client.Repository
-	Access   access.Repository
-	Hasher   PasswordHasher
-	Tokens   token.Service
+	Users     user.Repository
+	Sessions  session.Repository
+	Clients   client.Repository
+	Access    access.Repository
+	AuthCodes authcode.Repository
+	Hasher    PasswordHasher
+	Tokens    token.Service
 
 	SessionTTL time.Duration
 	// AccessTokenTTL is only reported back as TokenPair.ExpiresIn; the token service
 	// decides the real lifetime.
 	AccessTokenTTL time.Duration
+	// AuthCodeTTL caps the lifetime of a /authorize code (OAuth 2.1 §4.1.3: ≤60s).
+	AuthCodeTTL time.Duration
 }
 
 type Service struct {
@@ -46,10 +53,12 @@ type Service struct {
 	sessionRepo    session.Repository
 	clientRepo     client.Repository
 	accessRepo     access.Repository
+	authCodeRepo   authcode.Repository
 	hasher         PasswordHasher
 	tokens         token.Service
 	sessionTTL     time.Duration
 	accessTokenTTL time.Duration
+	authCodeTTL    time.Duration
 
 	// dummyHash is compared against when the user does not exist, so an unknown
 	// email takes as long as a wrong password and cannot be detected by timing.
@@ -64,6 +73,14 @@ func NewService(d Deps) (*Service, error) {
 		return nil, errors.New("auth: session TTL must be positive")
 	}
 
+	authCodeTTL := d.AuthCodeTTL
+	if authCodeTTL <= 0 {
+		authCodeTTL = authcode.MaxTTL
+	}
+	if authCodeTTL > authcode.MaxTTL {
+		return nil, fmt.Errorf("auth: auth code TTL must be ≤ %s", authcode.MaxTTL)
+	}
+
 	dummy, err := d.Hasher.Hash("timing-equalizer-not-a-real-password")
 	if err != nil {
 		return nil, fmt.Errorf("auth: compute dummy hash: %w", err)
@@ -74,10 +91,12 @@ func NewService(d Deps) (*Service, error) {
 		sessionRepo:    d.Sessions,
 		clientRepo:     d.Clients,
 		accessRepo:     d.Access,
+		authCodeRepo:   d.AuthCodes,
 		hasher:         d.Hasher,
 		tokens:         d.Tokens,
 		sessionTTL:     d.SessionTTL,
 		accessTokenTTL: d.AccessTokenTTL,
+		authCodeTTL:    authCodeTTL,
 		dummyHash:      dummy,
 	}, nil
 }

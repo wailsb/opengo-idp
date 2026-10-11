@@ -23,20 +23,25 @@ const (
 	TypeID      Type = "id"
 )
 
-// AccessTokenClaims authorize API calls. Subject holds the user ID; Attributes carry
-// ABAC inputs evaluated by resource servers.
+// AccessTokenClaims authorize API calls. Subject holds the user ID (or client ID
+// for the client_credentials grant); Attributes carry ABAC inputs evaluated by
+// resource servers.
 type AccessTokenClaims struct {
 	jwt.RegisteredClaims
-	TokenType   Type              `json:"token_type"`
-	UserID      uuid.UUID         `json:"uid"`
-	Email       string            `json:"email,omitempty"`
-	Roles       []string          `json:"roles,omitempty"`
-	Permissions []string          `json:"permissions,omitempty"`
-	Attributes  map[string]string `json:"attributes,omitempty"`
+	TokenType     Type              `json:"token_type"`
+	UserID        uuid.UUID         `json:"uid,omitempty"`
+	Email         string            `json:"email,omitempty"`
+	Scope         string            `json:"scope,omitempty"`
+	ClientID      string            `json:"client_id,omitempty"`
+	AuthorizedTo  string            `json:"azp,omitempty"`
+	Roles         []string          `json:"roles,omitempty"`
+	Permissions   []string          `json:"permissions,omitempty"`
+	Attributes    map[string]string `json:"attributes,omitempty"`
 }
 
 // IDTokenClaims assert the user's identity to an OIDC client. Audience must be the
-// client ID, and Nonce must echo the value sent in the authorization request.
+// client ID, and Nonce must echo the value sent in the authorization request. AtHash
+// (OIDC Core §3.1.3.6) binds the ID token to the issued access token.
 type IDTokenClaims struct {
 	jwt.RegisteredClaims
 	TokenType         Type              `json:"token_type"`
@@ -44,16 +49,21 @@ type IDTokenClaims struct {
 	Email             string            `json:"email,omitempty"`
 	PreferredUsername string            `json:"preferred_username,omitempty"`
 	Nonce             string            `json:"nonce,omitempty"`
+	AuthorizedTo      string            `json:"azp,omitempty"`
+	AtHash            string            `json:"at_hash,omitempty"`
 	Roles             []string          `json:"roles,omitempty"`
 	Permissions       []string          `json:"permissions,omitempty"`
 	Attributes        map[string]string `json:"attributes,omitempty"`
 }
 
-// RefreshTokenClaims bind a refresh token to a server-side session (sid), so revoking
-// the session invalidates the refresh token.
+// RefreshTokenClaims bind a refresh token to a server-side session (sid) and the
+// client it was issued to (azp), so revoking the session invalidates it and a
+// different client cannot use someone else's refresh token.
 type RefreshTokenClaims struct {
 	jwt.RegisteredClaims
-	TokenType Type      `json:"token_type"`
-	UserID    uuid.UUID `json:"uid"`
-	SessionID string    `json:"sid"`
+	TokenType    Type      `json:"token_type"`
+	UserID       uuid.UUID `json:"uid"`
+	SessionID    string    `json:"sid"`
+	Scope        string    `json:"scope,omitempty"`
+	AuthorizedTo string    `json:"azp,omitempty"`
 }

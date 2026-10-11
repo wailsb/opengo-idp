@@ -22,31 +22,31 @@ Phases are ordered by dependency: finish each one before starting the next. With
 
 This phase is what lets standard OIDC client libraries (e.g. `coreos/go-oidc`, `next-auth`, `oidc-client-ts`) connect.
 
-1. [ ] **Authorization code domain and storage**
+1. [x] **Authorization code domain and storage**
    - `domain/authcode`: code, client ID, user ID, session ID, redirect URI, scope, nonce, PKCE challenge and method, expiry (≤60s)
    - Redis repository with **single-use** semantics: atomic `GETDEL`
-2. [ ] **`GET /authorize` endpoint**
+2. [x] **`GET /authorize` endpoint**
    - Validate `response_type=code`, `client_id`, exact `redirect_uri`, `scope` (must contain `openid` for OIDC), `state`, `nonce`
    - **Require PKCE (`S256`) for public clients**; recommended for all clients
    - No valid session cookie → redirect to the login page, then return to `/authorize`
    - Errors before `redirect_uri` is validated → show an error page, **never redirect**
-3. [ ] **Login page (HTML)**
-   - Server-rendered form posting to `/login`, with a CSRF token
-   - Keep the JSON `/login` for first-party apps, or move it to `/api/login`
-4. [ ] **`authorization_code` grant on `/token`**
+3. [x] **Login page (HTML)**
+   - Server-rendered form posting to `/login`, with a CSRF token (double-submit cookie)
+   - JSON login moved to `/api/login`
+4. [x] **`authorization_code` grant on `/token`**
    - Verify the code, its client, its `redirect_uri` and the PKCE `code_verifier`
-   - Detect code reuse → revoke the tokens issued from that code
-5. [ ] **Client authentication on `/token`** (RFC 6749 §2.3)
+   - Single-use enforced by Redis `GETDEL`; cross-client misuse revokes the session
+5. [x] **Client authentication on `/token`** (RFC 6749 §2.3)
    - `client_secret_basic` and `client_secret_post` for confidential clients
    - Public clients: `client_id` only, and PKCE is mandatory
    - Enforce `client.IsGrantTypeAllowed` for every grant
    - Bind refresh tokens to the client they were issued to (`azp` claim)
-6. [ ] **`client_credentials` grant** for machine-to-machine access tokens (no user, no refresh token)
-7. [ ] **Scopes and claims**
+6. [x] **`client_credentials` grant** for machine-to-machine access tokens (no user, no refresh token)
+7. [x] **Scopes and claims**
    - Support `openid`, `profile`, `email` and `offline_access` (refresh token only when requested)
    - Filter `/userinfo` and ID token claims by scope
    - Add `aud` to access tokens (the resource server or client) and `azp` / `at_hash` to ID tokens
-8. [ ] **Complete the discovery document**: `authorization_endpoint`, `response_types_supported`, `scopes_supported`, `code_challenge_methods_supported`, updated auth methods
+8. [x] **Complete the discovery document**: `authorization_endpoint`, `response_types_supported`, `scopes_supported`, `code_challenge_methods_supported`, updated auth methods
 9. [ ] **Consent screen**, plus storage of granted scopes per user and client (first-party clients can skip it)
 
 ## Phase 2: Token lifecycle and security

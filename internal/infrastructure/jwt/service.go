@@ -3,6 +3,7 @@ package jwt
 import (
 	"context"
 	"crypto/rsa"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -74,48 +75,108 @@ func (s *Service) sign(claims gojwt.Claims) (string, error) {
 }
 
 func (s *Service) GenerateAccessToken(u *user.User, summary *access.UserAccessSummary) (string, error) {
-	claims := &token.AccessTokenClaims{
-		RegisteredClaims: s.registered(u.ID.String(), nil, s.cfg.AccessTokenTTL),
-		TokenType:        token.TypeAccess,
-		UserID:           u.ID,
-		Email:            u.Email,
+	return s.GenerateAccessTokenFor(token.AccessTokenRequest{User: u, Summary: summary})
+}
+
+func (s *Service) GenerateAccessTokenFor(req token.AccessTokenRequest) (string, error) {
+	if req.User == nil {
+		return "", errors.New("access token requires a user")
 	}
-	if summary != nil {
-		claims.Roles = summary.Roles
-		claims.Permissions = summary.Permissions
+	claims := &token.AccessTokenClaims{
+		RegisteredClaims: s.registered(req.User.ID.String(), req.Audience, s.cfg.AccessTokenTTL),
+		TokenType:        token.TypeAccess,
+		UserID:           req.User.ID,
+		Email:            req.User.Email,
+		Scope:            token.JoinScopes(req.Scopes),
+		ClientID:         req.ClientID,
+		AuthorizedTo:     req.ClientID,
+	}
+	if req.Summary != nil {
+		claims.Roles = req.Summary.Roles
+		claims.Permissions = req.Summary.Permissions
 	}
 	return s.sign(claims)
 }
 
 func (s *Service) GenerateRefreshToken(u *user.User, sessionID string) (string, error) {
-	if sessionID == "" {
+	return s.GenerateRefreshTokenFor(token.RefreshTokenRequest{User: u, SessionID: sessionID})
+}
+
+func (s *Service) GenerateRefreshTokenFor(req token.RefreshTokenRequest) (string, error) {
+	if req.User == nil {
+		return "", errors.New("refresh token requires a user")
+	}
+	if req.SessionID == "" {
 		return "", errors.New("refresh token requires a session ID")
 	}
 	return s.sign(&token.RefreshTokenClaims{
-		RegisteredClaims: s.registered(u.ID.String(), nil, s.cfg.RefreshTokenTTL),
+		RegisteredClaims: s.registered(req.User.ID.String(), nil, s.cfg.RefreshTokenTTL),
 		TokenType:        token.TypeRefresh,
-		UserID:           u.ID,
-		SessionID:        sessionID,
+		UserID:           req.User.ID,
+		SessionID:        req.SessionID,
+		Scope:            token.JoinScopes(req.Scopes),
+		AuthorizedTo:     req.ClientID,
 	})
 }
 
 func (s *Service) GenerateIDToken(u *user.User, summary *access.UserAccessSummary, clientID, nonce string) (string, error) {
-	if clientID == "" {
+	return s.GenerateIDTokenFor(token.IDTokenRequest{User: u, Summary: summary, ClientID: clientID, Nonce: nonce})
+}
+
+func (s *Service) GenerateIDTokenFor(req token.IDTokenRequest) (string, error) {
+	if req.User == nil {
+		return "", errors.New("id token requires a user")
+	}
+	if req.ClientID == "" {
 		return "", errors.New("id token requires a client ID audience")
 	}
+	includeProfile := len(req.Scopes) == 0 || token.HasScope(req.Scopes, token.ScopeProfile)
+	includeEmail := len(req.Scopes) == 0 || token.HasScope(req.Scopes, token.ScopeEmail)
+
 	claims := &token.IDTokenClaims{
-		RegisteredClaims:  s.registered(u.ID.String(), []string{clientID}, s.cfg.IDTokenTTL),
-		TokenType:         token.TypeID,
-		UserID:            u.ID,
-		Email:             u.Email,
-		PreferredUsername: u.Username,
-		Nonce:             nonce,
+		RegisteredClaims: s.registered(req.User.ID.String(), []string{req.ClientID}, s.cfg.IDTokenTTL),
+		TokenType:        token.TypeID,
+		UserID:           req.User.ID,
+		Nonce:            req.Nonce,
+		AuthorizedTo:     req.ClientID,
 	}
-	if summary != nil {
-		claims.Roles = summary.Roles
-		claims.Permissions = summary.Permissions
+	if includeEmail {
+		claims.Email = req.User.Email
+	}
+	if includeProfile {
+		claims.PreferredUsername = req.User.Username
+	}
+	if req.Summary != nil {
+		claims.Roles = req.Summary.Roles
+		claims.Permissions = req.Summary.Permissions
+	}
+	if req.AccessToken != "" {
+		claims.AtHash = atHashRS256(req.AccessToken)
 	}
 	return s.sign(claims)
+}
+
+// GenerateClientAccessToken mints an access token for the client_credentials
+// grant: no user, Subject = ClientID, no email or roles.
+func (s *Service) GenerateClientAccessToken(req token.ClientAccessTokenRequest) (string, error) {
+	if req.ClientID == "" {
+		return "", errors.New("client access token requires a client ID")
+	}
+	claims := &token.AccessTokenClaims{
+		RegisteredClaims: s.registered(req.ClientID, req.Audience, s.cfg.AccessTokenTTL),
+		TokenType:        token.TypeAccess,
+		Scope:            token.JoinScopes(req.Scopes),
+		ClientID:         req.ClientID,
+		AuthorizedTo:     req.ClientID,
+	}
+	return s.sign(claims)
+}
+
+// atHashRS256 is the OIDC Core §3.1.3.6 at_hash: left half of SHA-256(access_token)
+// (because the signing algorithm is RS256), base64url-encoded without padding.
+func atHashRS256(accessToken string) string {
+	sum := sha256.Sum256([]byte(accessToken))
+	return base64.RawURLEncoding.EncodeToString(sum[:len(sum)/2])
 }
 
 // parse verifies signature (RS256 only, matching kid), issuer and expiry into claims.

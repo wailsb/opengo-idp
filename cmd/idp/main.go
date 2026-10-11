@@ -101,21 +101,25 @@ func serve(ctx context.Context, cfg *config.Config, log *slog.Logger, pool *pgxp
 		return err
 	}
 
+	clientRepo := postgres.NewClientRepository(pool)
+
 	authSvc, err := auth.NewService(auth.Deps{
 		Users:          postgres.NewUserRepository(pool),
 		Sessions:       redisrepo.NewSessionRepository(rdb),
-		Clients:        postgres.NewClientRepository(pool),
+		Clients:        clientRepo,
 		Access:         postgres.NewAccessRepository(pool),
+		AuthCodes:      redisrepo.NewAuthCodeRepository(rdb),
 		Hasher:         pwHasher,
 		Tokens:         tokens,
 		SessionTTL:     cfg.Auth.SessionTTL,
 		AccessTokenTTL: cfg.Auth.AccessTokenTTL,
+		AuthCodeTTL:    cfg.Auth.AuthCodeTTL,
 	})
 	if err != nil {
 		return err
 	}
 
-	api := httpapi.NewServer(authSvc, tokens, httpapi.Config{
+	api := httpapi.NewServer(authSvc, tokens, clientRepo, httpapi.Config{
 		Issuer:        cfg.Auth.Issuer,
 		SecureCookies: cfg.HTTP.SecureCookies,
 	}, log)
