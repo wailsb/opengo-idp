@@ -54,7 +54,9 @@ type AuthConfig struct {
 	AccessTokenTTL  time.Duration `env:"AUTH_ACCESS_TOKEN_TTL" envDefault:"15m"`
 	RefreshTokenTTL time.Duration `env:"AUTH_REFRESH_TOKEN_TTL" envDefault:"24h"`
 	IDTokenTTL      time.Duration `env:"AUTH_ID_TOKEN_TTL" envDefault:"1h"`
-	BcryptCost      int           `env:"AUTH_BCRYPT_COST" envDefault:"12"`
+	// AuthCodeTTL caps the lifetime of an /authorize code (OAuth 2.1 §4.1.3: ≤60s).
+	AuthCodeTTL time.Duration `env:"AUTH_AUTH_CODE_TTL" envDefault:"60s"`
+	BcryptCost  int           `env:"AUTH_BCRYPT_COST" envDefault:"12"`
 }
 
 // Load reads configuration through lookup (os.LookupEnv in production).
@@ -76,6 +78,7 @@ func (c *Config) validate() error {
 		"AUTH_ACCESS_TOKEN_TTL":  c.Auth.AccessTokenTTL,
 		"AUTH_REFRESH_TOKEN_TTL": c.Auth.RefreshTokenTTL,
 		"AUTH_ID_TOKEN_TTL":      c.Auth.IDTokenTTL,
+		"AUTH_AUTH_CODE_TTL":     c.Auth.AuthCodeTTL,
 	}
 	for name, d := range durations {
 		if d <= 0 {
