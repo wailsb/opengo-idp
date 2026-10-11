@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/wailsb/opengo-idp/internal/domain/access"
+	"github.com/wailsb/opengo-idp/internal/domain/authcode"
 	"github.com/wailsb/opengo-idp/internal/domain/client"
 	"github.com/wailsb/opengo-idp/internal/domain/session"
 	"github.com/wailsb/opengo-idp/internal/domain/token"
@@ -141,48 +142,98 @@ func (r *fakeAccess) GetUserAccessSummary(context.Context, uuid.UUID) (*access.U
 
 // fakeTokens issues readable strings instead of JWTs:
 //
-//	access:<uid>   refresh:<uid>:<sid>   id:<uid>:<client>:<nonce>
+//	access:<uid>   refresh:<uid>:<sid>:<azp>:<scope>   id:<uid>:<client>:<nonce>
+//	client-access:<clientID>
 type fakeTokens struct {
 	token.Service
 	accessErr error
 }
 
-func (f *fakeTokens) GenerateAccessToken(u *user.User, _ *access.UserAccessSummary) (string, error) {
+func (f *fakeTokens) GenerateAccessToken(u *user.User, s *access.UserAccessSummary) (string, error) {
+	return f.GenerateAccessTokenFor(token.AccessTokenRequest{User: u, Summary: s})
+}
+
+func (f *fakeTokens) GenerateAccessTokenFor(req token.AccessTokenRequest) (string, error) {
 	if f.accessErr != nil {
 		return "", f.accessErr
 	}
-	return "access:" + u.ID.String(), nil
+	return "access:" + req.User.ID.String(), nil
 }
 
 func (f *fakeTokens) GenerateRefreshToken(u *user.User, sid string) (string, error) {
-	return "refresh:" + u.ID.String() + ":" + sid, nil
+	return f.GenerateRefreshTokenFor(token.RefreshTokenRequest{User: u, SessionID: sid})
 }
 
-func (f *fakeTokens) GenerateIDToken(u *user.User, _ *access.UserAccessSummary, clientID, nonce string) (string, error) {
-	return "id:" + u.ID.String() + ":" + clientID + ":" + nonce, nil
+func (f *fakeTokens) GenerateRefreshTokenFor(req token.RefreshTokenRequest) (string, error) {
+	return "refresh:" + req.User.ID.String() + ":" + req.SessionID + ":" + req.ClientID + ":" + token.JoinScopes(req.Scopes), nil
+}
+
+func (f *fakeTokens) GenerateIDToken(u *user.User, s *access.UserAccessSummary, clientID, nonce string) (string, error) {
+	return f.GenerateIDTokenFor(token.IDTokenRequest{User: u, Summary: s, ClientID: clientID, Nonce: nonce})
+}
+
+func (f *fakeTokens) GenerateIDTokenFor(req token.IDTokenRequest) (string, error) {
+	return "id:" + req.User.ID.String() + ":" + req.ClientID + ":" + req.Nonce, nil
+}
+
+func (f *fakeTokens) GenerateClientAccessToken(req token.ClientAccessTokenRequest) (string, error) {
+	return "client-access:" + req.ClientID, nil
 }
 
 func (f *fakeTokens) ValidateRefreshToken(tok string) (*token.RefreshTokenClaims, error) {
-	parts := strings.SplitN(tok, ":", 3)
-	if len(parts) != 3 || parts[0] != "refresh" {
+	parts := strings.SplitN(tok, ":", 5)
+	if len(parts) < 3 || parts[0] != "refresh" {
 		return nil, token.ErrInvalidToken
 	}
 	uid, err := uuid.Parse(parts[1])
 	if err != nil {
 		return nil, token.ErrInvalidToken
 	}
-	return &token.RefreshTokenClaims{TokenType: token.TypeRefresh, UserID: uid, SessionID: parts[2]}, nil
+	claims := &token.RefreshTokenClaims{TokenType: token.TypeRefresh, UserID: uid, SessionID: parts[2]}
+	if len(parts) >= 4 {
+		claims.AuthorizedTo = parts[3]
+	}
+	if len(parts) == 5 {
+		claims.Scope = parts[4]
+	}
+	return claims, nil
+}
+
+type fakeAuthCodes struct {
+	mu     sync.Mutex
+	byCode map[string]*authcode.AuthCode
+}
+
+func (r *fakeAuthCodes) Create(_ context.Context, c *authcode.AuthCode) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	cp := *c
+	r.byCode[c.Code] = &cp
+	return nil
+}
+
+func (r *fakeAuthCodes) GetAndDelete(_ context.Context, code string) (*authcode.AuthCode, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	c, ok := r.byCode[code]
+	if !ok {
+		return nil, authcode.ErrAuthCodeNotFound
+	}
+	delete(r.byCode, code)
+	cp := *c
+	return &cp, nil
 }
 
 type fixture struct {
-	svc      *Service
-	users    *fakeUsers
-	sessions *fakeSessions
-	clients  *fakeClients
-	access   *fakeAccess
-	hasher   *fakeHasher
-	tokens   *fakeTokens
-	alice    *user.User
+	svc       *Service
+	users     *fakeUsers
+	sessions  *fakeSessions
+	clients   *fakeClients
+	access    *fakeAccess
+	authCodes *fakeAuthCodes
+	hasher    *fakeHasher
+	tokens    *fakeTokens
+	alice     *user.User
 }
 
 const alicePassword = "correct-horse"
@@ -194,9 +245,10 @@ func newFixture() *fixture {
 		clients: &fakeClients{byClientID: map[string]*client.Client{
 			"web-app": {ID: uuid.New(), ClientID: "web-app", Name: "Web"},
 		}},
-		access: &fakeAccess{summary: &access.UserAccessSummary{Roles: []string{"admin"}}},
-		hasher: &fakeHasher{},
-		tokens: &fakeTokens{},
+		access:    &fakeAccess{summary: &access.UserAccessSummary{Roles: []string{"admin"}}},
+		authCodes: &fakeAuthCodes{byCode: map[string]*authcode.AuthCode{}},
+		hasher:    &fakeHasher{},
+		tokens:    &fakeTokens{},
 	}
 	f.alice = &user.User{
 		ID:           uuid.New(),
@@ -212,10 +264,12 @@ func newFixture() *fixture {
 		Sessions:       f.sessions,
 		Clients:        f.clients,
 		Access:         f.access,
+		AuthCodes:      f.authCodes,
 		Hasher:         f.hasher,
 		Tokens:         f.tokens,
 		SessionTTL:     time.Hour,
 		AccessTokenTTL: 15 * time.Minute,
+		AuthCodeTTL:    30 * time.Second,
 	})
 	if err != nil {
 		panic(err)
